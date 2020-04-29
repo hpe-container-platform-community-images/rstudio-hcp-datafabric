@@ -1,0 +1,137 @@
+# Create a Namespace for Example MapR Apps 
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mapr-apps
+  labels:
+    name: mapr-apps
+
+# MapR Apps ServiceAccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mapr-apps-sa
+  namespace: mapr-apps
+
+# Ticket to authenticate with HPE Container Platform internal Data Fabric
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mapr-ticket-hcp-secret
+  namespace: mapr-apps
+type: Opaque
+data:
+# To create a Ticket, login onto the MapR cluster and execute following:
+# 1. maprlogin password -user (your user name) 
+# 2. echo -n $(cat /tmp/maprticket_####) | base64 -w 0
+# 3. Copy the base64 encoded ticket into the CONTAINER_TICKET line, eg:
+# Note for Testing only you can use the following Command on the Controller Node ## echo -n $(cat /opt/bluedata/mapr/conf/mapruserticket ) | base64 -w 0
+  CONTAINER_TICKET: #.  -< !!!!!!!!!!!!!!!!!!!!!!!!! ENTER  YOUR BASE 64 Encoded Ticket here #########
+---
+# Create Persistent Volume on Internal Data Fabric
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-mapr-apps
+  namespace: mapr-apps
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  claimRef:
+    namespace: mapr-apps
+    name: pvc-mapr-apps
+  csi:
+    nodePublishSecretRef:
+      name: "mapr-ticket-hcp-secret"
+      namespace: "mapr-apps"
+    driver: com.mapr.csi-kdf
+    volumeHandle: tmp
+    volumeAttributes:
+      volumePath: "/"
+      cluster: "hcp.mapr.cluster"	
+      cldbHosts: "10.1.0.195"			#  <--- Adjust the CLDB Name:  1. Login on HCP Controller, 2 Execute bdmapr maprcli node listcldbs 
+      securityType: "secure"
+      platinum: "true"   
+	  
+# Create PVC for internal Data Fabric
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-mapr-apps
+  namespace: mapr-apps
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 30G
+	  
+apiVersion: apps/v1
+
+---
+#### Deployment Rstudio using integrated persistent Datafabric mounted on /mapr
+kind: Deployment
+metadata:
+ name: rstudio
+ namespace: mapr-apps
+spec:
+  selector:
+    matchLabels:
+      app: rstudio
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: rstudio
+        tier: frontend
+    spec:
+       containers:
+         - name: mapr-apps-rstudio
+           image: rocker/rstudio:3.2.0
+           imagePullPolicy: IfNotPresent 
+           ports:
+             - containerPort: 8787
+               name: rstudio-port
+       
+           resources:
+             requests:
+               memory: "4Gi"
+               cpu: "500m"
+           volumeMounts:
+             - mountPath: /mapr/hcp.mapr.cluster
+               name: maprvolume
+           env: 
+             - name: PASSWORD
+               value: "admin123"
+    
+       serviceAccount: mapr-apps-sa
+       serviceAccountName: mapr-apps-sa
+       volumes:
+        - name: maprvolume
+          persistentVolumeClaim:
+           claimName: pvc-mapr-apps
+---
+### Expose Rstudio Server via the HCP internal Gateway 
+apiVersion: v1
+kind: Service
+metadata:
+  name: rstudio
+  namespace: mapr-apps
+  labels:
+    hpecp.hpe.com/hpecp-internal-gateway: "true"
+spec:
+  selector: 
+    app: rstudio
+  ports:
+  - name: rstudio-port
+    protocol: TCP
+    port: 8787
+    targetPort: 8787
+  type: NodePort
